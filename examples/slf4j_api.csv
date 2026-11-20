@@ -1,0 +1,6 @@
+key,value
+package,org.slf4j:slf4j-api:1.7.36
+repository,https://repo.maven.apache.org/maven2/
+test_mode,false
+output,../output/slf4j-api.svg
+filter,

@@ -3,8 +3,9 @@
 import argparse
 import sys
 
-from src.config import describe, load_config
+from src.config import load_config
 from src.errors import ToolError
+from src.maven import MavenRepository
 
 
 def arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -15,11 +16,17 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Загружает и показывает все настройки первого этапа."""
+    """На втором этапе показывает прямые зависимости Maven-пакета."""
     args = arguments(argv)
     try:
         config = load_config(args.config)
-        print(describe(config))
+        if config.test_mode:
+            raise ToolError("test_mode: поддержка появится на третьем этапе")
+        repository = MavenRepository(config.repository)
+        dependencies = repository.dependencies(config.package)
+        print(f"Прямые зависимости {config.package}:")
+        for dependency in dependencies:
+            print(dependency)
         return 0
     except ToolError as error:
         print(f"Ошибка: {error}", file=sys.stderr)

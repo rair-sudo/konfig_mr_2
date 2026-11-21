@@ -7,13 +7,15 @@ from src.config import Config, load_config
 from src.errors import ToolError
 from src.graph import build_graph
 from src.maven import MavenRepository
+from src.reverse import reverse_dependencies
 from src.test_repository import TestRepository
 
 
 def arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Читает расположение CSV-конфигурации."""
+    """Читает расположение CSV-конфигурации и цель обратного поиска."""
     parser = argparse.ArgumentParser(description="Граф зависимостей Maven")
     parser.add_argument("--config", default="config.csv", help="файл настроек")
+    parser.add_argument("--reverse", metavar="PACKAGE", help="обратные связи")
     return parser.parse_args(argv)
 
 
@@ -32,13 +34,23 @@ def show_graph(graph: dict[str, list[str]]) -> None:
         print(f"{package}: {', '.join(children) if children else '-'}")
 
 
+def show_reverse(graph: dict[str, list[str]], target: str) -> None:
+    """Выводит предков узла по рёбрам построенного графа."""
+    print(f"Обратные зависимости {target}:")
+    for package in reverse_dependencies(graph, target):
+        print(package)
+
+
 def main(argv: list[str] | None = None) -> int:
-    """На третьем этапе строит и показывает граф зависимостей."""
+    """Строит граф и при запросе показывает обратные зависимости."""
     args = arguments(argv)
     try:
         config = load_config(args.config)
         graph = graph_from_config(config)
-        show_graph(graph)
+        if args.reverse is None:
+            show_graph(graph)
+        else:
+            show_reverse(graph, args.reverse)
         return 0
     except ToolError as error:
         print(f"Ошибка: {error}", file=sys.stderr)

@@ -7,6 +7,7 @@ from src.config import Config, load_config
 from src.errors import ToolError
 from src.graph import build_graph
 from src.maven import MavenRepository
+from src.render import save_graph
 from src.reverse import reverse_dependencies
 from src.test_repository import TestRepository
 
@@ -16,6 +17,8 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Граф зависимостей Maven")
     parser.add_argument("--config", default="config.csv", help="файл настроек")
     parser.add_argument("--reverse", metavar="PACKAGE", help="обратные связи")
+    parser.add_argument("--force", action="store_true",
+                        help="перезаписать файлы")
     return parser.parse_args(argv)
 
 
@@ -28,27 +31,23 @@ def graph_from_config(config: Config) -> dict[str, list[str]]:
     return build_graph(config.package, repository.dependencies, config.filter)
 
 
-def show_graph(graph: dict[str, list[str]]) -> None:
-    """Печатает вершины и рёбра на третьем этапе разработки."""
-    for package, children in graph.items():
-        print(f"{package}: {', '.join(children) if children else '-'}")
-
-
 def show_reverse(graph: dict[str, list[str]], target: str) -> None:
     """Выводит предков узла по рёбрам построенного графа."""
+    packages = reverse_dependencies(graph, target)
     print(f"Обратные зависимости {target}:")
-    for package in reverse_dependencies(graph, target):
+    for package in packages:
         print(package)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Строит граф и при запросе показывает обратные зависимости."""
+    """Сохраняет граф или показывает обратные зависимости."""
     args = arguments(argv)
     try:
         config = load_config(args.config)
         graph = graph_from_config(config)
         if args.reverse is None:
-            show_graph(graph)
+            d2, svg = save_graph(graph, config.output_path(), args.force)
+            print(f"D2: {d2}\nSVG: {svg}")
         else:
             show_reverse(graph, args.reverse)
         return 0

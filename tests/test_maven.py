@@ -115,7 +115,7 @@ class MavenDependenciesTests(MavenTestCase):
                  "<nested>${revision}</nested></properties>")
         body = props + deps(dep("org.example:lib", version="${nested}"))
         self.install("org.app:app:2.1", pom("org.app:app:2.1", body,
-                                             namespace=False))
+                                            namespace=False))
         self.assertEqual(self.repo.dependencies("org.app:app:2.1"),
                          ["org.example:lib:2.1"])
 
@@ -176,8 +176,8 @@ class MavenDependenciesTests(MavenTestCase):
         managed = management(dep("g:lib", version="1"),
                              dep("g:lib", version="2", type="test-jar",
                                  classifier="tests"))
-        body = managed + deps(dep("g:lib"), dep("g:lib", type="test-jar",
-                                                  classifier="tests"))
+        second = dep("g:lib", type="test-jar", classifier="tests")
+        body = managed + deps(dep("g:lib"), second)
         self.install("sample:app:1", pom("sample:app:1", body))
         self.assertEqual(self.repo.dependencies("sample:app:1"),
                          ["g:lib:1", "g:lib:2"])

@@ -7,6 +7,7 @@ from pathlib import Path
 from src.errors import ToolError
 
 _NAME = re.compile(r"[A-Z]+")
+_FIELD_COUNT = 2
 
 
 def _valid_name(name: str) -> bool:
@@ -16,7 +17,7 @@ def _valid_name(name: str) -> bool:
 
 def _parse_row(row: list[str], data: dict[str, list[str]]) -> None:
     """Validate and add exactly one CSV row to the repository."""
-    if len(row) != 2:
+    if len(row) != _FIELD_COUNT:
         raise ToolError("Each CSV row must have exactly two fields")
     package, field = row
     if not _valid_name(package):

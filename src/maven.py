@@ -29,6 +29,13 @@ _MAX_PARENTS = 64
 _MAX_PROPERTY_DEPTH = 64
 _MAX_PROPERTY_SIZE = 16384
 _TIMEOUT = 20
+_COORDINATE_PARTS = 3
+_MAX_HOST_LABEL = 63
+_CONTROL_LIMIT = 32
+_MAX_CACHED_PROPERTIES = 256
+_INVALID_PORT = 0
+_REDIRECT_MIN = 300
+_REDIRECT_MAX = 400
 _PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*\Z", re.ASCII)
 _GROUP_PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z", re.ASCII)
 _PROPERTY = re.compile(r"\$\{([^{}]+)\}")
@@ -47,7 +54,7 @@ def _coordinate(value: str) -> Coordinate:
         raise ToolError("Координата Maven должна иметь вид "
                         "group:artifact:version")
     parts = value.split(":")
-    if len(parts) != 3:
+    if len(parts) != _COORDINATE_PARTS:
         raise ToolError(f"Некорректная координата Maven: {value!r}")
     group, artifact, version = parts
     valid_group = all(_GROUP_PART.fullmatch(p) for p in group.split("."))
@@ -62,7 +69,8 @@ def _coordinate(value: str) -> Coordinate:
 def _valid_host(host: str) -> bool:
     """Разрешить обычные DNS-имена и буквальные IPv6-адреса."""
     if _HOST.fullmatch(host):
-        return all(part and len(part) <= 63 for part in host.split("."))
+        return all(part and len(part) <= _MAX_HOST_LABEL
+                   for part in host.split("."))
     try:
         ipaddress.IPv6Address(host)
         return True
@@ -74,7 +82,8 @@ def _url_parts(value: str) -> urllib.parse.SplitResult:
     """Разобрать URL, исключив управляющие символы и неверный порт."""
     if not isinstance(value, str) or not value or value != value.strip():
         raise ToolError("URL Maven-репозитория должен быть непустой строкой")
-    if any(c in value for c in "\\?#") or any(ord(c) < 32 for c in value):
+    if (any(c in value for c in "\\?#")
+            or any(ord(c) < _CONTROL_LIMIT for c in value)):
         raise ToolError(f"Недопустимый URL Maven-репозитория: {value!r}")
     try:
         parsed = urllib.parse.urlsplit(value)
@@ -97,7 +106,8 @@ def _base_url(value: str) -> str:
     host = parsed.hostname
     if parsed.scheme not in ("http", "https") or not host:
         raise ToolError(f"Ожидается HTTP(S) URL Maven-репозитория: {value!r}")
-    if parsed.username is not None or not _valid_host(host) or parsed.port == 0:
+    if (parsed.username is not None or not _valid_host(host)
+            or parsed.port == _INVALID_PORT):
         raise ToolError(f"Недопустимый адрес Maven-репозитория: {value!r}")
     if not _valid_path(parsed.path):
         raise ToolError(f"Недопустимый путь Maven-репозитория: {value!r}")
@@ -184,7 +194,7 @@ class _Resolver:
             raise ToolError(f"Неизвестное свойство ${{{name}}} в "
                             f"{self.context}")
         result = self.resolve(self.values[name], stack + (name,))
-        if len(self.cache) < 256:
+        if len(self.cache) < _MAX_CACHED_PROPERTIES:
             self.cache[name] = result
         return result
 
@@ -328,7 +338,7 @@ class MavenRepository:
             with self._opener.open(url, timeout=_TIMEOUT) as response:
                 data = response.read(_MAX_POM_BYTES + 1)
         except urllib.error.HTTPError as exc:
-            if 300 <= exc.code < 400:
+            if _REDIRECT_MIN <= exc.code < _REDIRECT_MAX:
                 raise ToolError(f"HTTP {exc.code} для POM {url}: "
                                 "перенаправления запрещены") from exc
             raise ToolError(f"HTTP {exc.code} при загрузке POM {url}") from exc

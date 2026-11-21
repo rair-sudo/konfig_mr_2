@@ -115,13 +115,18 @@ def _validate_repository(value: str, test_mode: bool, base: Path) -> None:
         _validate_url(value)
 
 
+def _forbidden_output_characters(parts: list[str]) -> bool:
+    """Проверяет недопустимые символы компонентов Windows-пути."""
+    return any(any(char in '<>:"|?*' for char in part) for part in parts)
+
+
 def _validate_output(value: str) -> None:
     """Проверяет имя SVG, в том числе недопустимые символы Windows."""
     path = PureWindowsPath(value)
     if not value or path.suffix.lower() != ".svg" or path.is_reserved():
         raise ToolError("output: укажите допустимое имя файла .svg")
     parts = [part for part in path.parts if part != path.anchor]
-    if any(any(char in '<>:"|?*' for char in part) for part in parts):
+    if _forbidden_output_characters(parts):
         raise ToolError("output: в имени есть недопустимые символы Windows")
     if any(ord(char) < CONTROL_LIMIT for char in value):
         raise ToolError("output: управляющие символы запрещены")

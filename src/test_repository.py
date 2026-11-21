@@ -45,15 +45,20 @@ def _load_repository(path: Path) -> dict[str, list[str]]:
     """Read and validate one UTF-8 CSV file, including all references."""
     data: dict[str, list[str]] = {}
     try:
-        with path.open("r", encoding="utf-8", newline="") as source:
+        with path.open("r", encoding="utf-8-sig", newline="") as source:
             rows = csv.reader(source, strict=True)
             if next(rows, None) != ["package", "dependencies"]:
                 raise ToolError("CSV header must be package,dependencies")
             for row in rows:
-                _parse_row(row, data)
+                try:
+                    _parse_row(row, data)
+                except ToolError as exc:
+                    raise ToolError(f"line {rows.line_num}: {exc}") from exc
+        _validate_references(data)
+    except ToolError as exc:
+        raise ToolError(f"CSV repository {path}: {exc}") from exc
     except (OSError, UnicodeError, csv.Error) as exc:
         raise ToolError(f"Cannot read CSV repository {path}: {exc}") from exc
-    _validate_references(data)
     return data
 
 

@@ -2,6 +2,7 @@
 
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -12,7 +13,7 @@ from unittest import mock
 import xml.etree.ElementTree as ET
 
 from src.errors import ToolError
-from src.render import save_graph, to_d2, to_svg
+from src.render import _rollback, save_graph, to_d2, to_svg
 
 
 SVG = "{http://www.w3.org/2000/svg}"
@@ -401,7 +402,8 @@ class RenderTests(unittest.TestCase):
                  names[1]: [names[0], names[2]], names[2]: [names[3]]}
         result = subprocess.run(
             [shutil.which("d2"), "--stdout-format", "svg", "-", "-"],
-            input=to_d2(graph), text=True, capture_output=True,
+            input=to_d2(graph), text=True, encoding="utf-8",
+            capture_output=True,
             check=False, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -412,6 +414,260 @@ class RenderTests(unittest.TestCase):
         paths = [item for item in root.iter(f"{SVG}path")
                  if "connection" in item.get("class", "")]
         self.assertEqual(len(paths), 6)
+
+
+class OverwriteRecoveryTests(unittest.TestCase):
+    """Проверяет подготовку копий, откат и очистку после ошибок."""
+
+    def setUp(self):
+        """Создаёт два разных исходных файла с произвольными байтами."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.svg = self.root / "graph.svg"
+        self.d2 = self.svg.with_suffix(".d2")
+        self.original_d2 = b"old d2\x00\xff"
+        self.original_svg = b"old svg\x00\xfe"
+        self.d2.write_bytes(self.original_d2)
+        self.svg.write_bytes(self.original_svg)
+
+    def _replace_failing_on(self, *numbers, inspect=None):
+        """Создаёт mock для конкретных вызовов настоящего os.replace."""
+        original = os.replace
+        calls = 0
+
+        def replace(source, target):
+            """Пропускает обычные вызовы и прерывает выбранные."""
+            nonlocal calls
+            calls += 1
+            if inspect is not None:
+                inspect(calls)
+            if calls in numbers:
+                raise OSError(f"replace failure {calls}")
+            return original(source, target)
+
+        return mock.patch("src.render.os.replace", side_effect=replace)
+
+    def _assert_no_auxiliary_files(self):
+        """Убеждается, что резервные и рабочие файлы удалены."""
+        self.assertEqual(set(self.root.iterdir()), {self.d2, self.svg})
+
+    def test_first_and_second_replace_failures_restore_both(self):
+        """До первой замены готовы обе копии; ошибки не портят оригиналы."""
+        def inspect(call):
+            """Проверяет обе резервные копии непосредственно перед заменой."""
+            if call == 1:
+                copies = self.root.glob(".graph-backup-*")
+                self.assertEqual({path.read_bytes() for path in copies},
+                                 {self.original_d2, self.original_svg})
+
+        for failing_call in (1, 2):
+            with self.subTest(failing_call=failing_call):
+                with self._replace_failing_on(failing_call, inspect=inspect):
+                    with self.assertRaisesRegex(ToolError, "replace failure"):
+                        save_graph({"новый": []}, self.svg, True)
+                self.assertEqual(self.d2.read_bytes(), self.original_d2)
+                self.assertEqual(self.svg.read_bytes(), self.original_svg)
+                self._assert_no_auxiliary_files()
+
+    def test_second_failure_removes_new_file(self):
+        """При отсутствии старого D2 только что созданный D2 удаляется."""
+        self.d2.unlink()
+        with self._replace_failing_on(2):
+            with self.assertRaisesRegex(ToolError, "replace failure 2"):
+                save_graph({"a": []}, self.svg, True)
+        self.assertFalse(self.d2.exists())
+        self.assertEqual(self.svg.read_bytes(), self.original_svg)
+        self.assertEqual(list(self.root.iterdir()), [self.svg])
+
+    def test_failed_restore_keeps_all_backups_and_reports_paths(self):
+        """При провале отката обе копии уцелели и перечислены в ошибке."""
+        with self._replace_failing_on(2, 3):
+            with self.assertRaises(ToolError) as caught:
+                save_graph({"new": []}, self.svg, True)
+        backups = list(self.root.glob(".graph-backup-*"))
+        self.assertEqual({path.read_bytes() for path in backups},
+                         {self.original_d2, self.original_svg})
+        message = str(caught.exception)
+        self.assertIn("replace failure 2", message)
+        self.assertIn("replace failure 3", message)
+        self.assertIn("частичное изменение", message)
+        for path in backups:
+            self.assertIn(str(path), message)
+        self.assertEqual(self.d2.read_text(encoding="utf-8"),
+                         to_d2({"new": []}))
+        self.assertEqual(self.svg.read_bytes(), self.original_svg)
+        expected = {self.d2, self.svg, *backups}
+        self.assertEqual(set(self.root.iterdir()), expected)
+
+    def test_failed_removal_keeps_other_original_backup(self):
+        """Ошибка удаления созданного D2 сохраняет резервную копию SVG."""
+        self.d2.unlink()
+        original_unlink = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            """Имитирует запрет удаления только нового результата."""
+            if path == self.d2:
+                raise OSError("cannot remove created file")
+            return original_unlink(path, *args, **kwargs)
+
+        with self._replace_failing_on(2), mock.patch.object(Path, "unlink",
+                                                            unlink):
+            with self.assertRaises(ToolError) as caught:
+                save_graph({"new": []}, self.svg, True)
+        backups = list(self.root.glob(".graph-backup-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), self.original_svg)
+        self.assertIn(str(backups[0]), str(caught.exception))
+        self.assertIn("частичное изменение", str(caught.exception))
+        self.assertEqual(self.svg.read_bytes(), self.original_svg)
+        expected = {self.d2, self.svg, *backups}
+        self.assertEqual(set(self.root.iterdir()), expected)
+
+    def test_rollback_does_not_remove_another_process_file(self):
+        """Откат не удаляет результат, заменённый посторонним файлом."""
+        self.d2.unlink()
+        foreign = self.root / "foreign"
+        foreign.write_bytes(b"foreign data")
+        original = os.replace
+        calls = 0
+
+        def replace(source, target):
+            """Подменяет новый D2 до неудачной второй замены."""
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                original(foreign, self.d2)
+                raise OSError("second replace failure")
+            return original(source, target)
+
+        with mock.patch("src.render.os.replace", side_effect=replace):
+            with self.assertRaises(ToolError) as caught:
+                save_graph({"new": []}, self.svg, True)
+        backups = list(self.root.glob(".graph-backup-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), self.original_svg)
+        self.assertEqual(self.d2.read_bytes(), b"foreign data")
+        self.assertIn("частичное изменение", str(caught.exception))
+        self.assertIn(str(backups[0]), str(caught.exception))
+
+    def test_cleanup_failure_reports_path_and_cleans_other_files(self):
+        """Ошибка очистки не мешает удалить остальные служебные файлы."""
+        original_unlink = Path.unlink
+        failed = []
+
+        def unlink(path, *args, **kwargs):
+            """Не удаляет только первую резервную копию."""
+            if path.name.startswith(".graph-backup-") and not failed:
+                failed.append(path)
+                raise OSError("cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", unlink):
+            with self.assertRaises(ToolError) as caught:
+                save_graph({"new": []}, self.svg, True)
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(failed[0].exists())
+        self.assertIn(str(failed[0]), str(caught.exception))
+        self.assertIn("cleanup failure", str(caught.exception))
+        expected = {self.d2, self.svg, *failed}
+        self.assertEqual(set(self.root.iterdir()), expected)
+        self.assertEqual(self.d2.read_text(encoding="utf-8"),
+                         to_d2({"new": []}))
+
+    def test_rollback_attempts_every_replaced_file(self):
+        """Ошибка восстановления одного пути не блокирует оставшиеся."""
+        backups = [self.root / "first.backup", self.root / "second.backup"]
+        backups[0].write_bytes(self.original_d2)
+        backups[1].write_bytes(self.original_svg)
+        self.d2.write_bytes(b"new d2")
+        self.svg.write_bytes(b"new svg")
+        replaced = []
+        for target, backup in zip((self.d2, self.svg), backups):
+            info = target.lstat()
+            replaced.append((target, backup, (info.st_dev, info.st_ino)))
+        original = os.replace
+
+        def replace(source, target):
+            """Ломает первый откат, но разрешает следующий."""
+            if target == self.svg:
+                raise OSError("restore failure")
+            return original(source, target)
+
+        with mock.patch("src.render.os.replace", side_effect=replace):
+            failures = _rollback(replaced)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("restore failure", failures[0])
+        self.assertEqual(self.d2.read_bytes(), self.original_d2)
+        self.assertEqual(self.svg.read_bytes(), b"new svg")
+        self.assertEqual(backups[1].read_bytes(), self.original_svg)
+
+    def test_backup_failure_leaves_originals_and_no_auxiliary_files(self):
+        """Ошибка копирования до замен не затрагивает исходные файлы."""
+        original = shutil.copyfileobj
+        calls = 0
+
+        def copy(source, target, *args, **kwargs):
+            """Ломает создание второй копии после первой успешной."""
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("backup failure")
+            return original(source, target, *args, **kwargs)
+
+        with mock.patch("src.render.shutil.copyfileobj", side_effect=copy):
+            with self.assertRaisesRegex(ToolError, "backup failure"):
+                save_graph({"new": []}, self.svg, True)
+        self.assertEqual(self.d2.read_bytes(), self.original_d2)
+        self.assertEqual(self.svg.read_bytes(), self.original_svg)
+        self._assert_no_auxiliary_files()
+
+    def test_externally_changed_target_is_not_overwritten(self):
+        """Изменение второго файла после снимка обнаруживается до замены."""
+        def inspect(call):
+            """Имитирует стороннюю запись после подготовки обеих копий."""
+            if call == 1:
+                self.svg.write_bytes(b"external change")
+
+        with self._replace_failing_on(inspect=inspect):
+            with self.assertRaisesRegex(ToolError, "изменился"):
+                save_graph({"new": []}, self.svg, True)
+        self.assertEqual(self.d2.read_bytes(), self.original_d2)
+        self.assertEqual(self.svg.read_bytes(), b"external change")
+        self._assert_no_auxiliary_files()
+
+    def test_symlink_is_not_overwritten(self):
+        """Символическая ссылка и её целевой файл остаются нетронутыми."""
+        self.svg.unlink()
+        external = self.root / "external.txt"
+        external.write_bytes(self.original_svg)
+        try:
+            self.svg.symlink_to(external)
+        except (OSError, NotImplementedError):
+            self.skipTest("Создание символических ссылок недоступно")
+        with self.assertRaisesRegex(ToolError, "обычным файлом"):
+            save_graph({"new": []}, self.svg, True)
+        self.assertTrue(self.svg.is_symlink())
+        self.assertEqual(external.read_bytes(), self.original_svg)
+        self.assertEqual(self.d2.read_bytes(), self.original_d2)
+        self.assertEqual(set(self.root.iterdir()),
+                         {self.d2, self.svg, external})
+
+    def test_collision_message_has_both_launch_options(self):
+        """Конфликт каждого из файлов даёт подсказку и не меняет данные."""
+        for target in (self.d2, self.svg):
+            if target == self.svg:
+                self.d2.unlink()
+            with self.assertRaises(ToolError) as caught:
+                save_graph({}, self.svg)
+            message = str(caught.exception)
+            self.assertIn(str(target), message)
+            self.assertIn("уже существует", message)
+            self.assertIn("--force", message)
+            self.assertIn("run.bat", message)
+            self.assertIn("--no-overwrite", message)
+        self.assertFalse(self.d2.exists())
+        self.assertEqual(self.svg.read_bytes(), self.original_svg)
 
 
 if __name__ == "__main__":

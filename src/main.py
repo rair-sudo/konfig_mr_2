@@ -1,6 +1,8 @@
 """Командный интерфейс программы."""
 
 import argparse
+import os
+from pathlib import Path
 import sys
 
 from src.config import Config, load_config
@@ -12,13 +14,20 @@ from src.reverse import reverse_dependencies
 from src.test_repository import TestRepository
 
 
+DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config.csv"
+
+
 def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     """Читает расположение CSV-конфигурации и цель обратного поиска."""
     parser = argparse.ArgumentParser(description="Граф зависимостей Maven")
-    parser.add_argument("--config", default="config.csv", help="файл настроек")
+    parser.add_argument("--config", default=DEFAULT_CONFIG,
+                        help="файл настроек")
     parser.add_argument("--reverse", metavar="PACKAGE", help="обратные связи")
     parser.add_argument("--force", action="store_true",
                         help="перезаписать файлы")
+    parser.add_argument("--no-overwrite", dest="force", action="store_false",
+                        help="не перезаписывать файлы")
+    parser.set_defaults(force=False)
     return parser.parse_args(argv)
 
 
@@ -39,11 +48,41 @@ def show_reverse(graph: dict[str, list[str]], target: str) -> None:
         print(package)
 
 
+def _same_path(first: Path, second: Path) -> bool:
+    """Сравнивает пути, символические и жёсткие ссылки на один файл."""
+    try:
+        left = os.path.normcase(str(first.resolve()))
+        right = os.path.normcase(str(second.resolve()))
+        if left == right:
+            return True
+        try:
+            return first.samefile(second)
+        except FileNotFoundError:
+            return False
+    except (OSError, RuntimeError) as error:
+        raise ToolError(f"Не удалось сравнить пути: {error}") from error
+
+
+def _protect_sources(config: Config, config_path: str | Path) -> None:
+    """Запрещает совпадение любого результата с исходными файлами."""
+    sources = [Path(config_path)]
+    if config.test_mode:
+        sources.append(config.repository_path())
+    svg = config.output_path()
+    for output in (svg, svg.with_suffix(".d2")):
+        for source in sources:
+            if _same_path(output, source):
+                raise ToolError(f"Результат совпадает с исходным файлом: "
+                                f"{output}")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Сохраняет граф или показывает обратные зависимости."""
     args = arguments(argv)
     try:
         config = load_config(args.config)
+        if args.reverse is None:
+            _protect_sources(config, args.config)
         graph = graph_from_config(config)
         if args.reverse is None:
             d2, svg = save_graph(graph, config.output_path(), args.force)

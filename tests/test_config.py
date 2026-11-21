@@ -51,6 +51,13 @@ class ConfigTests(unittest.TestCase):
         config = load_config(self.write_config())
         self.assertFalse(config.test_mode)
 
+    def test_quoted_output_with_comma_and_unicode(self):
+        """Путь с запятой корректно читается из кавычек CSV."""
+        output = "папка, данные/граф.svg"
+        path = self.write_config(dict(self.values, output=output))
+        config = load_config(path)
+        self.assertEqual(config.output_path(), self.base / output)
+
     def test_bad_parameters(self):
         """Каждый из пяти параметров способен выдать понятную ошибку."""
         cases = {

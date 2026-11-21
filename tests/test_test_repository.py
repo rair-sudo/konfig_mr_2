@@ -1,6 +1,7 @@
 """Tests for the local UTF-8 CSV test repository."""
 
 import io
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,6 +42,20 @@ class TestRepositoryTests(unittest.TestCase):
         self.assertEqual(repo.dependencies("A"), ["B", "C"])
         self.assertEqual(repo.dependencies("B"), [])
         self.assertEqual(repo.dependencies("C"), [])
+
+    def test_utf8_bom_in_unicode_path(self) -> None:
+        """Allow UTF-8 BOM in a repository saved by Windows applications."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "репозиторий данных.csv"
+            data = b"\xef\xbb\xbfpackage,dependencies\r\nA,B\r\nB,\r\n"
+            path.write_bytes(data)
+            repo = TestRepository(path)
+            self.assertEqual(repo.dependencies("A"), ["B"])
+
+    def test_error_reports_path_and_row(self) -> None:
+        """Report the location of an invalid row for diagnosis."""
+        with self.assertRaisesRegex(ToolError, r"mock.csv.*line 2"):
+            load_text("package,dependencies\nA,invalid\n")
 
     def test_result_is_a_copy(self) -> None:
         """Mutating a returned list must not modify the repository."""

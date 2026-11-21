@@ -17,6 +17,8 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import tempfile
 from xml.sax.saxutils import escape
 
@@ -25,6 +27,9 @@ from src.errors import ToolError
 
 Graph = dict[str, list[str]]
 Edge = tuple[str, str]
+_FileState = tuple[int, ...]
+_Snapshot = tuple[Path | None, _FileState | None]
+_Replacement = tuple[Path, Path | None, tuple[int, int]]
 _LINE_LIMIT = 26
 _NODE_WIDTH = 320
 _LINE_HEIGHT = 20
@@ -228,32 +233,172 @@ def _remove_created(created: list[tuple[Path, os.stat_result]]) -> None:
             pass
 
 
-def _write_temporary(target: Path, text: str) -> Path:
-    """Записывает временный файл в каталоге конечного результата."""
-    descriptor, name = tempfile.mkstemp(prefix=".graph-", dir=target.parent)
-    temporary = Path(name)
+def _write_temporary(target: Path, text: str, files: list[Path]) -> Path:
+    """Записывает результат рядом с целью и сразу учитывает временный файл."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", prefix=".graph-",
+        dir=target.parent, delete=False,
+    ) as stream:
+        path = Path(stream.name)
+        files.append(path)
+        stream.write(text)
+    return path
+
+
+def _file_state(info: os.stat_result) -> _FileState:
+    """Возвращает идентичность и изменяемые признаки обычного файла."""
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns)
+
+
+def _check_target(target: Path, expected: _FileState | None) -> None:
+    """Отклоняет заметные изменения пути после подготовки его копии."""
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return temporary
+        actual = _file_state(target.lstat())
+    except FileNotFoundError:
+        actual = None
+    if actual != expected:
+        raise OSError(f"Файл результата изменился во время записи: {target}")
+
+
+def _backup_original(target: Path, backups: list[Path]) -> _Snapshot:
+    """Копирует обычный исходный файл, отклоняя символические ссылки."""
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return None, None
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError(f"Результат не является обычным файлом: {target}")
+    expected = _file_state(info)
+    with target.open("rb") as source:
+        if _file_state(os.fstat(source.fileno())) != expected:
+            raise OSError(f"Файл изменился до копирования: {target}")
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix=".graph-backup-", dir=target.parent,
+            delete=False,
+        ) as copy:
+            backup = Path(copy.name)
+            backups.append(backup)
+            shutil.copyfileobj(source, copy)
+        if _file_state(os.fstat(source.fileno())) != expected:
+            raise OSError(f"Файл изменился при копировании: {target}")
+    _check_target(target, expected)
+    shutil.copystat(target, backup, follow_symlinks=False)
+    _check_target(target, expected)
+    return backup, expected
+
+
+def _restore_one(target: Path, backup: Path | None,
+                 identity: tuple[int, int]) -> None:
+    """Восстанавливает исходный файл либо удаляет созданный этим вызовом."""
+    try:
+        current = target.lstat()
+    except FileNotFoundError:
+        current = None
+    if current is not None and (current.st_dev, current.st_ino) != identity:
+        raise OSError(f"Результат изменён извне, откат невозможен: {target}")
+    if backup is not None:
+        os.replace(backup, target)
+    elif current is not None:
+        target.unlink()
+
+
+def _rollback(replaced: list[_Replacement]) -> list[str]:
+    """Пытается откатить все замены даже после отдельной ошибки."""
+    failures = []
+    for target, backup, identity in reversed(replaced):
+        try:
+            _restore_one(target, backup, identity)
+        except Exception as error:
+            failures.append(f"{target}: {error}")
+    return failures
+
+
+def _cleanup_files(files: list[Path]) -> list[str]:
+    """Пытается удалить все служебные файлы и сообщает о неудачах."""
+    failures = []
+    for path in files:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            failures.append(f"{path}: {error}")
+    return failures
+
+
+def _report_save_failure(error, rollback, cleanup, backups) -> None:
+    """Сообщает о неудачном откате и оставленных резервных копиях."""
+    if rollback:
+        paths = [str(path) for path in backups if path.exists()]
+        saved = ", ".join(paths) if paths else "отсутствуют"
+        message = (f"Не удалось сохранить граф: {error}; ошибки отката: "
+                   f"{'; '.join(rollback)}; резервные копии: {saved}; "
+                   "возможно частичное изменение файлов")
+    elif error is not None:
+        message = f"Не удалось сохранить граф: {error}"
+    else:
+        message = "Граф записан, но не удалось очистить служебные файлы"
+    if cleanup:
+        message += f"; не удалены временные файлы: {'; '.join(cleanup)}"
+    raise ToolError(message) from error
 
 
 def _save_replacing(d2: Path, svg: Path, texts: tuple[str, str]) -> None:
-    """Подготавливает результаты, а затем заменяет существующие файлы."""
+    """Сначала готовит все данные и копии, затем заменяет пути с откатом."""
+    targets = (d2, svg)
     temporary: list[Path] = []
+    backups: list[Path] = []
+    snapshots: list[_Snapshot] = []
+    replaced: list[_Replacement] = []
+    error = None
+    rollback: list[str] = []
     try:
-        if d2.is_dir() or svg.is_dir():
-            raise OSError("Путь результата является каталогом")
-        for target, text in zip((d2, svg), texts):
-            temporary.append(_write_temporary(target, text))
-        for source, target in zip(temporary, (d2, svg)):
+        for target, text in zip(targets, texts):
+            _write_temporary(target, text, temporary)
+        for target in targets:
+            snapshots.append(_backup_original(target, backups))
+        for target, source, (backup, expected) in zip(
+            targets, temporary, snapshots
+        ):
+            _check_target(target, expected)
+            info = source.lstat()
             os.replace(source, target)
-    finally:
-        for path in temporary:
-            path.unlink(missing_ok=True)
+            replaced.append((target, backup, (info.st_dev, info.st_ino)))
+    except BaseException as caught:
+        error = caught
+        rollback = _rollback(replaced)
+    cleanup = _cleanup_files(temporary + ([] if rollback else backups))
+    if rollback or cleanup:
+        _report_save_failure(error, rollback, cleanup, backups)
+    if error is not None:
+        raise error
+
+
+def _open_new(stack: ExitStack, target: Path):
+    """Создаёт новый файл и подсказывает варианты устранения конфликта."""
+    try:
+        return stack.enter_context(
+            target.open("x", encoding="utf-8", newline="\n"))
+    except FileExistsError as error:
+        raise ToolError(
+            f"Файл уже существует: {target}. Для прямого запуска используйте "
+            "--force; при запуске через run.bat уберите --no-overwrite"
+        ) from error
+
+
+def _save_new(d2: Path, svg: Path, texts: tuple[str, str]) -> None:
+    """Создаёт оба результата без перезаписи либо удаляет созданные файлы."""
+    created: list[tuple[Path, os.stat_result]] = []
+    try:
+        with ExitStack() as stack:
+            d2_file = _open_new(stack, d2)
+            created.append((d2, os.fstat(d2_file.fileno())))
+            svg_file = _open_new(stack, svg)
+            created.append((svg, os.fstat(svg_file.fileno())))
+            d2_file.write(texts[0])
+            svg_file.write(texts[1])
+    except BaseException:
+        _remove_created(created)
+        raise
 
 
 def save_graph(graph: Graph, svg_path: str | Path,
@@ -261,10 +406,13 @@ def save_graph(graph: Graph, svg_path: str | Path,
     """Создаёт D2 и SVG и возвращает (D2, SVG).
 
     Без overwrite существующие файлы защищены от перезаписи. С overwrite
-    данные сначала записываются во временные файлы, после чего результаты
-    заменяются по одному. Ошибки файловой системы преобразуются в ToolError.
+    результаты заменяются по одному после подготовки резервных копий; при
+    ошибке выполняется откат. Это не атомарная транзакция: пара может быть
+    временно несогласованной, а откат или очистка могут завершиться ошибкой.
+    Символические ссылки и другие необычные файлы не перезаписываются.
+    Нет гарантии при системном сбое или одновременной записи извне.
+    Ошибки файловой системы преобразуются в ToolError.
     """
-    created: list[tuple[Path, os.stat_result]] = []
     try:
         svg = Path(svg_path)
         d2 = svg.with_suffix(".d2")
@@ -276,17 +424,8 @@ def save_graph(graph: Graph, svg_path: str | Path,
         svg.parent.mkdir(parents=True, exist_ok=True)
         if overwrite:
             _save_replacing(d2, svg, (d2_text, svg_text))
-            return d2, svg
-        with ExitStack() as stack:
-            d2_file = stack.enter_context(
-                d2.open("x", encoding="utf-8", newline="\n"))
-            created.append((d2, os.fstat(d2_file.fileno())))
-            svg_file = stack.enter_context(
-                svg.open("x", encoding="utf-8", newline="\n"))
-            created.append((svg, os.fstat(svg_file.fileno())))
-            d2_file.write(d2_text)
-            svg_file.write(svg_text)
+        else:
+            _save_new(d2, svg, (d2_text, svg_text))
         return d2, svg
     except (OSError, ValueError, TypeError) as error:
-        _remove_created(created)
         raise ToolError(f"Не удалось сохранить граф: {error}") from error

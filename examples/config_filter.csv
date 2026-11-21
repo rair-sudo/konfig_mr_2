@@ -1,0 +1,6 @@
+key,value
+package,ROOT
+repository,test_filter.csv
+test_mode,true
+output,../output/filter.svg
+filter,EXCLUDE

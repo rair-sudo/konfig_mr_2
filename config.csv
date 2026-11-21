@@ -1,6 +1,6 @@
 key,value
-package,junit:junit:4.13.2
-repository,https://repo.maven.apache.org/maven2/
-test_mode,false
+package,A
+repository,examples/repository.csv
+test_mode,true
 output,output/graph.svg
 filter,

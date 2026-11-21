@@ -3,9 +3,11 @@
 import argparse
 import sys
 
-from src.config import load_config
+from src.config import Config, load_config
 from src.errors import ToolError
+from src.graph import build_graph
 from src.maven import MavenRepository
+from src.test_repository import TestRepository
 
 
 def arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -15,18 +17,28 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def graph_from_config(config: Config) -> dict[str, list[str]]:
+    """Загружает доступные зависимости и обходит граф без рекурсии."""
+    if config.test_mode:
+        repository = TestRepository(config.repository_path())
+    else:
+        repository = MavenRepository(config.repository)
+    return build_graph(config.package, repository.dependencies, config.filter)
+
+
+def show_graph(graph: dict[str, list[str]]) -> None:
+    """Печатает вершины и рёбра на третьем этапе разработки."""
+    for package, children in graph.items():
+        print(f"{package}: {', '.join(children) if children else '-'}")
+
+
 def main(argv: list[str] | None = None) -> int:
-    """На втором этапе показывает прямые зависимости Maven-пакета."""
+    """На третьем этапе строит и показывает граф зависимостей."""
     args = arguments(argv)
     try:
         config = load_config(args.config)
-        if config.test_mode:
-            raise ToolError("test_mode: поддержка появится на третьем этапе")
-        repository = MavenRepository(config.repository)
-        dependencies = repository.dependencies(config.package)
-        print(f"Прямые зависимости {config.package}:")
-        for dependency in dependencies:
-            print(dependency)
+        graph = graph_from_config(config)
+        show_graph(graph)
         return 0
     except ToolError as error:
         print(f"Ошибка: {error}", file=sys.stderr)

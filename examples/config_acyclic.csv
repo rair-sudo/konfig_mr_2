@@ -1,0 +1,6 @@
+key,value
+package,ROOT
+repository,test_acyclic.csv
+test_mode,true
+output,../output/acyclic.svg
+filter,

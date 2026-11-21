@@ -1,0 +1,6 @@
+key,value
+package,ROOT
+repository,test_cycle.csv
+test_mode,true
+output,../output/cycle.svg
+filter,

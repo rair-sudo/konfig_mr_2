@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as element_tree
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -146,7 +146,7 @@ class CliTests(unittest.TestCase):
         """Сверяет XML, подписи SVG и вершины и рёбра D2 с ожидаемым графом."""
         self.assertTrue(self.svg.is_file())
         self.assertTrue(self.d2.is_file())
-        root = ET.parse(self.svg).getroot()
+        root = element_tree.parse(self.svg).getroot()
         self.assertEqual(root.tag, f"{SVG_NS}svg")
         labels = {item.text for item in root.iter() if item.text}
         for node in graph:

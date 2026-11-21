@@ -19,7 +19,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as element_tree
 from typing import TypeAlias
 
 from src.errors import ToolError
@@ -114,18 +114,20 @@ def _base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _child(node: ET.Element, name: str) -> ET.Element | None:
+def _child(
+    node: element_tree.Element, name: str
+) -> element_tree.Element | None:
     """Найти непосредственный дочерний элемент с любым XML namespace."""
     return node.find("{*}" + name)
 
 
-def _text(node: ET.Element, name: str) -> str:
+def _text(node: element_tree.Element, name: str) -> str:
     """Прочитать необязательное значение дочернего элемента."""
     element = _child(node, name)
     return (element.text or "").strip() if element is not None else ""
 
 
-def _properties(root: ET.Element) -> dict[str, str]:
+def _properties(root: element_tree.Element) -> dict[str, str]:
     """Считать объявления свойств POM."""
     result = {}
     node = _child(root, "properties")
@@ -150,7 +152,7 @@ def _aliases(coord: Coordinate, parent: Coordinate | None) -> dict[str, str]:
     return result
 
 
-class _Resolver:
+class Resolver:
     """Разрешать свойства с обнаружением циклов и ограничением размера."""
 
     def __init__(self, values: dict[str, str], context: str):
@@ -199,14 +201,16 @@ class _Resolver:
         return result
 
 
-def _parent(root: ET.Element, coord: Coordinate) -> Coordinate | None:
+def _parent(
+    root: element_tree.Element, coord: Coordinate
+) -> Coordinate | None:
     """Получить координату родителя из POM, разрешив локальные свойства."""
     node = _child(root, "parent")
     if node is None:
         return None
     values = _properties(root)
     values.update(_aliases(coord, None))
-    resolver = _Resolver(values, ":".join(coord))
+    resolver = Resolver(values, ":".join(coord))
     fields = [resolver.resolve(_text(node, n)) for n in _FIELDS[:3]]
     try:
         return _coordinate(":".join(fields))
@@ -215,8 +219,8 @@ def _parent(root: ET.Element, coord: Coordinate) -> Coordinate | None:
                         f"{exc}") from exc
 
 
-def _identity(root: ET.Element, coord: Coordinate,
-              parent: Coordinate | None, resolver: _Resolver) -> None:
+def _identity(root: element_tree.Element, coord: Coordinate,
+              parent: Coordinate | None, resolver: Resolver) -> None:
     """Убедиться, что загруженный POM описывает запрошенный артефакт."""
     group = _text(root, "groupId") or (parent[0] if parent else "")
     artifact = _text(root, "artifactId")
@@ -228,7 +232,9 @@ def _identity(root: ET.Element, coord: Coordinate,
                         f"с запрошенными {':'.join(coord)}")
 
 
-def _declarations(root: ET.Element, managed: bool) -> list[Declaration]:
+def _declarations(
+    root: element_tree.Element, managed: bool
+) -> list[Declaration]:
     """Получить непосредственно объявленные зависимости одного POM."""
     node = _child(root, "dependencyManagement") if managed else root
     if node is None:
@@ -243,7 +249,7 @@ def _declarations(root: ET.Element, managed: bool) -> list[Declaration]:
     return result
 
 
-def _key(dependency: Declaration, resolver: _Resolver) -> Key:
+def _key(dependency: Declaration, resolver: Resolver) -> Key:
     """Определить Maven-ключ для управления и наследования зависимостей."""
     group = resolver.resolve(dependency.get("groupId", ""))
     artifact = resolver.resolve(dependency.get("artifactId", ""))
@@ -257,7 +263,7 @@ def _key(dependency: Declaration, resolver: _Resolver) -> Key:
     return group, artifact, kind, classifier
 
 
-def _merge_declarations(roots: list[ET.Element], resolver: _Resolver,
+def _merge_declarations(roots: list[element_tree.Element], resolver: Resolver,
                         managed: bool) -> dict[Key, Declaration]:
     """Объединить родительские и дочерние объявления по Maven-ключу."""
     result: dict[Key, Declaration] = {}
@@ -271,7 +277,7 @@ def _merge_declarations(roots: list[ET.Element], resolver: _Resolver,
     return result
 
 
-def _included(item: Declaration, resolver: _Resolver) -> bool:
+def _included(item: Declaration, resolver: Resolver) -> bool:
     """Отобрать необязательные и неиспользуемые для исполнения зависимости."""
     try:
         scope = resolver.resolve(item.get("scope", "compile"))
@@ -292,7 +298,7 @@ def _included(item: Declaration, resolver: _Resolver) -> bool:
 
 
 def _dependency_coordinate(key: Key, item: Declaration,
-                           resolver: _Resolver) -> str:
+                           resolver: Resolver) -> str:
     """Разрешить и проверить итоговую координату прямой зависимости."""
     version = resolver.resolve(item.get("version", ""))
     if not version:
@@ -306,7 +312,7 @@ def _dependency_coordinate(key: Key, item: Declaration,
                         f"{exc}") from exc
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
+class NoRedirect(urllib.request.HTTPRedirectHandler):
     """Запретить перенаправления, в том числе на другие протоколы и серверы."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -320,9 +326,9 @@ class MavenRepository:
     def __init__(self, base_url: str):
         """Проверить базовый URL и инициализировать кэши репозитория."""
         self.base_url = _base_url(base_url)
-        self._poms: dict[Coordinate, ET.Element] = {}
+        self._poms: dict[Coordinate, element_tree.Element] = {}
         self._results: dict[Coordinate, tuple[str, ...]] = {}
-        self._opener = urllib.request.build_opener(_NoRedirect())
+        self._opener = urllib.request.build_opener(NoRedirect())
 
     def _url(self, coord: Coordinate) -> str:
         """Построить стандартный путь к опубликованному POM."""
@@ -331,7 +337,7 @@ class MavenRepository:
         return (f"{self.base_url}/{path}/{artifact}/{version}/"
                 f"{artifact}-{version}.pom")
 
-    def _download(self, coord: Coordinate) -> ET.Element:
+    def _download(self, coord: Coordinate) -> element_tree.Element:
         """Загрузить ограниченный POM и разобрать его как безопасный XML."""
         url = self._url(coord)
         try:
@@ -351,14 +357,17 @@ class MavenRepository:
         if b"<!doctype" in lowered or b"<!entity" in lowered:
             raise ToolError(f"DTD/ENTITY запрещены в POM: {url}")
         try:
-            root = ET.fromstring(data)
-        except (ET.ParseError, ValueError) as exc:
+            root = element_tree.fromstring(data)
+        except (element_tree.ParseError, ValueError) as exc:
             raise ToolError(f"Повреждённый XML POM {url}: {exc}") from exc
-        if root.tag.rsplit("}", 1)[-1] != "project":
+        root_name = root.tag.rsplit("}", 1)[-1]
+        if root_name != "project":
             raise ToolError(f"Корневой элемент POM не project: {url}")
         return root
 
-    def _chain(self, coord: Coordinate) -> list[tuple[Coordinate, ET.Element]]:
+    def _chain(
+        self, coord: Coordinate
+    ) -> list[tuple[Coordinate, element_tree.Element]]:
         """Загрузить родителей, обнаруживая циклы и чрезмерную глубину."""
         chain = []
         seen = set()
@@ -376,15 +385,15 @@ class MavenRepository:
         return list(reversed(chain))
 
     def _resolver(
-        self, chain: list[tuple[Coordinate, ET.Element]]
-    ) -> _Resolver:
+        self, chain: list[tuple[Coordinate, element_tree.Element]]
+    ) -> Resolver:
         """Объединить свойства предков и проверить координаты каждого POM."""
         values: dict[str, str] = {}
         parent = None
         for coord, root in chain:
             values.update(_properties(root))
             values.update(_aliases(coord, parent))
-            resolver = _Resolver(values, ":".join(coord))
+            resolver = Resolver(values, ":".join(coord))
             _identity(root, coord, parent, resolver)
             parent = coord
         return resolver

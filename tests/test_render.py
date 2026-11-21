@@ -10,13 +10,19 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as element_tree
 
 from src.errors import ToolError
 from src.render import _rollback, save_graph, to_d2, to_svg
 
 
 SVG = "{http://www.w3.org/2000/svg}"
+MAX_LABEL_LENGTH = 26
+FIRST_INDEX = 0
+LAST_INDEX_OFFSET = 1
+FIRST_REPLACE_CALL = 1
+SECOND_REPLACE_CALL = 2
+SECOND_BACKUP_CALL = 2
 
 
 def _svg_nodes(root):
@@ -83,8 +89,10 @@ def _bounds(points):
 
 def _intersects(first, second):
     """Проверяет даже касание границ, включая вырожденные линии."""
-    return not (first[2] < second[0] or first[0] > second[2] or
-                first[3] < second[1] or first[1] > second[3])
+    left_a, top_a, right_a, bottom_a = first
+    left_b, top_b, right_b, bottom_b = second
+    return not (right_a < left_b or left_a > right_b or
+                bottom_a < top_b or top_a > bottom_b)
 
 
 def _d2_parts(text):
@@ -99,7 +107,7 @@ def _d2_parts(text):
     return set(nodes.values()), Counter((nodes[a], nodes[b]) for a, b in edges)
 
 
-class _BrokenWriter:
+class BrokenWriter:
     """Контекстный поток, имитирующий ошибку записи в файл."""
 
     def __init__(self, stream):
@@ -159,9 +167,9 @@ class RenderTests(unittest.TestCase):
             box = _bounds(points)
             self.assert_on_canvas(box, width, height)
             allowed = set()
-            if index == 0:
+            if index == FIRST_INDEX:
                 allowed.add(src)
-            if index == len(segments) - 1:
+            if index == len(segments) - LAST_INDEX_OFFSET:
                 allowed.add(dst)
             for ident, rect in rectangles.items():
                 if ident not in allowed:
@@ -190,7 +198,7 @@ class RenderTests(unittest.TestCase):
             "EPSILON": [label, "ALPHA"],
             label: ["ALPHA", label, label],
         }
-        root = ET.fromstring(to_svg(graph))
+        root = element_tree.fromstring(to_svg(graph))
         nodes = _svg_nodes(root)
         expected = Counter((src, dst) for src, targets in graph.items()
                            for dst in targets)
@@ -210,7 +218,7 @@ class RenderTests(unittest.TestCase):
         graph = {"ALPHA": ["ALPHA"] * 40 + ["BETA"] * 35,
                  "BETA": ["ALPHA"] * 35 + ["BETA"] * 40}
         svg = to_svg(graph)
-        root = ET.fromstring(svg)
+        root = element_tree.fromstring(svg)
         nodes = _svg_nodes(root)
         self.assertEqual(_svg_edges(root, nodes)["ALPHA", "ALPHA"], 40)
         self.assertEqual(_svg_edges(root, nodes)["BETA", "ALPHA"], 35)
@@ -225,7 +233,7 @@ class RenderTests(unittest.TestCase):
             'пакет <"&>\\': ["目标", 'пакет <"&>\\'],
             "目标": ["Зависимость", 'пакет <"&>\\'],
         }
-        root = ET.fromstring(to_svg(graph))
+        root = element_tree.fromstring(to_svg(graph))
         nodes = _svg_nodes(root)
         self.assertEqual(set(nodes.values()), set(graph) | {"Зависимость"})
         expected = Counter((src, dst) for src, deps in graph.items()
@@ -242,7 +250,7 @@ class RenderTests(unittest.TestCase):
         """Петли, циклы, повторы и обратные связи остаются различимыми."""
         graph = {"a": ["a", "a", "b", "b"], "b": ["a", "c"],
                  "c": ["a"]}
-        root = ET.fromstring(to_svg(graph))
+        root = element_tree.fromstring(to_svg(graph))
         nodes = _svg_nodes(root)
         edges = _svg_edges(root, nodes)
         self.assertEqual(edges["a", "a"], 2)
@@ -259,7 +267,7 @@ class RenderTests(unittest.TestCase):
         """Пустой граф корректен, а порядок ввода не влияет на вывод."""
         self.assertEqual(to_d2({}), "")
         empty = to_svg({})
-        self.assertEqual(_svg_nodes(ET.fromstring(empty)), {})
+        self.assertEqual(_svg_nodes(element_tree.fromstring(empty)), {})
         self.assertNotIn("nan", empty.lower())
         first = {"b": ["a", "c"], "a": ["c"]}
         second = {"a": ["c"], "b": ["c", "a"]}
@@ -270,7 +278,7 @@ class RenderTests(unittest.TestCase):
         """Длинные метки переносятся, высота и размер холста растут."""
         label = "Очень длинная зависимость <>" * 45
         result = to_svg({label: [], "строка\nвторая строка": []})
-        root = ET.fromstring(result)
+        root = element_tree.fromstring(result)
         nodes = _svg_nodes(root)
         self.assertIn(label, nodes.values())
         group = next(g for g in root.iter(f"{SVG}g")
@@ -278,7 +286,7 @@ class RenderTests(unittest.TestCase):
                      and g.find(f"{SVG}title").text == label)
         lines = [text.text or "" for text in group.findall(f"{SVG}text")]
         self.assertEqual("".join(lines), label)
-        self.assertTrue(all(len(line) <= 26 for line in lines))
+        self.assertTrue(all(len(line) <= MAX_LABEL_LENGTH for line in lines))
         rect = group.find(f"{SVG}rect")
         self.assertGreater(int(rect.get("height")), 800)
         self.assertGreater(int(root.get("height")), int(rect.get("height")))
@@ -287,7 +295,7 @@ class RenderTests(unittest.TestCase):
         """Непредставимые в XML символы показаны явными escape-кодами."""
         graph = {"A\x00B\tC\rD\ud800": []}
         xml = to_svg(graph)
-        ET.fromstring(xml)
+        element_tree.fromstring(xml)
         self.assertIn(r"A\u0000B\tC\rD\ud800", xml)
         self.assertIn(r"\\u0000", to_d2(graph))
 
@@ -295,7 +303,7 @@ class RenderTests(unittest.TestCase):
         """Холст и его узлы масштабируются без обрезания содержимого."""
         graph = {f"node-{i:03}": [f"node-{(i + 1) % 300:03}"]
                  for i in range(300)}
-        root = ET.fromstring(to_svg(graph))
+        root = element_tree.fromstring(to_svg(graph))
         nodes = _svg_nodes(root)
         self.assertEqual(len(nodes), 300)
         self.assertEqual(sum(_svg_edges(root, nodes).values()), 300)
@@ -386,7 +394,7 @@ class RenderTests(unittest.TestCase):
             def open_with_failure(path, *args, **kwargs):
                 """Создаёт сломанный поток только для SVG."""
                 stream = original_open(path, *args, **kwargs)
-                return _BrokenWriter(stream) if path == svg else stream
+                return BrokenWriter(stream) if path == svg else stream
 
             with mock.patch.object(Path, "open", open_with_failure):
                 with self.assertRaisesRegex(ToolError, "disk failure"):
@@ -407,7 +415,7 @@ class RenderTests(unittest.TestCase):
             check=False, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        root = ET.fromstring(result.stdout)
+        root = element_tree.fromstring(result.stdout)
         texts = ["".join(item.itertext()) for item in root.iter(f"{SVG}text")]
         for name in names:
             self.assertIn(name, texts)
@@ -456,7 +464,7 @@ class OverwriteRecoveryTests(unittest.TestCase):
         """До первой замены готовы обе копии; ошибки не портят оригиналы."""
         def inspect(call):
             """Проверяет обе резервные копии непосредственно перед заменой."""
-            if call == 1:
+            if call == FIRST_REPLACE_CALL:
                 copies = self.root.glob(".graph-backup-*")
                 self.assertEqual({path.read_bytes() for path in copies},
                                  {self.original_d2, self.original_svg})
@@ -536,7 +544,7 @@ class OverwriteRecoveryTests(unittest.TestCase):
             """Подменяет новый D2 до неудачной второй замены."""
             nonlocal calls
             calls += 1
-            if calls == 2:
+            if calls == SECOND_REPLACE_CALL:
                 original(foreign, self.d2)
                 raise OSError("second replace failure")
             return original(source, target)
@@ -611,7 +619,7 @@ class OverwriteRecoveryTests(unittest.TestCase):
             """Ломает создание второй копии после первой успешной."""
             nonlocal calls
             calls += 1
-            if calls == 2:
+            if calls == SECOND_BACKUP_CALL:
                 raise OSError("backup failure")
             return original(source, target, *args, **kwargs)
 
@@ -626,7 +634,7 @@ class OverwriteRecoveryTests(unittest.TestCase):
         """Изменение второго файла после снимка обнаруживается до замены."""
         def inspect(call):
             """Имитирует стороннюю запись после подготовки обеих копий."""
-            if call == 1:
+            if call == FIRST_REPLACE_CALL:
                 self.svg.write_bytes(b"external change")
 
         with self._replace_failing_on(inspect=inspect):

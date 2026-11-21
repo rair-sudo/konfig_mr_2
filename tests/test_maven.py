@@ -8,7 +8,7 @@ from unittest.mock import patch
 from xml.sax.saxutils import escape
 
 from src.errors import ToolError
-from src.maven import MavenRepository, _NoRedirect
+from src.maven import MavenRepository, NoRedirect, Resolver
 
 
 BASE = "https://repo.example.test/maven2"
@@ -49,6 +49,15 @@ def deps(*items):
 def management(*items):
     """Построить секцию dependencyManagement."""
     return "<dependencyManagement>" + deps(*items) + "</dependencyManagement>"
+
+
+class ResolverTests(unittest.TestCase):
+    """Проверить публичный класс разрешения свойств."""
+
+    def test_resolves_nested_properties(self):
+        """Разрешать свойства при непосредственном использовании класса."""
+        resolver = Resolver({"version": "2", "name": "v${version}"}, "g:a:1")
+        self.assertEqual(resolver.resolve("${name}"), "v2")
 
 
 class MavenTestCase(unittest.TestCase):
@@ -265,7 +274,7 @@ class MavenErrorTests(MavenTestCase):
 
     def test_redirects_are_not_followed(self):
         """Не разрешать переходы по HTTP redirect на произвольные адреса."""
-        handler = _NoRedirect()
+        handler = NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, "", {},
                                                    "http://other.test"))
         error = urllib.error.HTTPError(BASE, 302, "Found", {}, None)

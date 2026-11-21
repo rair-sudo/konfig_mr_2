@@ -27,9 +27,9 @@ from src.errors import ToolError
 
 Graph = dict[str, list[str]]
 Edge = tuple[str, str]
-_FileState = tuple[int, ...]
-_Snapshot = tuple[Path | None, _FileState | None]
-_Replacement = tuple[Path, Path | None, tuple[int, int]]
+FileState = tuple[int, ...]
+Snapshot = tuple[Path | None, FileState | None]
+Replacement = tuple[Path, Path | None, tuple[int, int]]
 _LINE_LIMIT = 26
 _NODE_WIDTH = 320
 _LINE_HEIGHT = 20
@@ -46,7 +46,7 @@ _XML_INVALID_CODES = frozenset((0xFFFE, 0xFFFF))
 
 
 @dataclass(frozen=True)
-class _Node:
+class Node:
     """Положение узла и строки его видимой метки."""
 
     ident: str
@@ -123,9 +123,9 @@ def _layout(vertices: list[str], edges: list[Edge]):
         label_height = 42 + _LINE_HEIGHT * (len(lines) - 1)
         port_height = 24 + _PORT_GAP * max(0, ports[vertex] - 1)
         height = max(label_height, port_height)
-        positions[vertex] = _Node(f"n{index}", _MARGIN + _NODE_WIDTH // 2,
-                                  top + height // 2, height, lines,
-                                  ports[vertex])
+        positions[vertex] = Node(f"n{index}", _MARGIN + _NODE_WIDTH // 2,
+                                 top + height // 2, height, lines,
+                                 ports[vertex])
         top += height + _NODE_GAP
     lane_width = 32 + _LANE_GAP * (len(edges) - 1) if edges else 0
     width = 2 * _MARGIN + _NODE_WIDTH + lane_width
@@ -133,12 +133,12 @@ def _layout(vertices: list[str], edges: list[Edge]):
     return positions, width, height
 
 
-def _port_y(node: _Node, index: int) -> float:
+def _port_y(node: Node, index: int) -> float:
     """Выделяет отдельную точку на правой границе для каждого конца ребра."""
     return node.y + _PORT_GAP * (index - (node.ports - 1) / 2)
 
 
-def _edge_path(src: _Node, dst: _Node, first: int, last: int,
+def _edge_path(src: Node, dst: Node, first: int, last: int,
                lane: int) -> str:
     """Проводит дугу справа от всех узлов, скругляя её повороты."""
     x = src.x + _NODE_WIDTH // 2
@@ -153,7 +153,7 @@ def _edge_path(src: _Node, dst: _Node, first: int, last: int,
             f"{lane - radius:.2f} {y2:.2f} H {x}")
 
 
-def _edge_elements(edges: list[Edge], nodes: dict[str, _Node]) -> list[str]:
+def _edge_elements(edges: list[Edge], nodes: dict[str, Node]) -> list[str]:
     """Даёт каждому ребру собственную полосу и две разные точки касания."""
     used: Counter[str] = Counter()
     elements = []
@@ -171,7 +171,7 @@ def _edge_elements(edges: list[Edge], nodes: dict[str, _Node]) -> list[str]:
     return elements
 
 
-def _node_element(node: _Node, label: str) -> str:
+def _node_element(node: Node, label: str) -> str:
     """Возвращает размеченный узел с полностью видимой меткой."""
     left = node.x - _NODE_WIDTH // 2
     top = node.y - node.height / 2
@@ -245,13 +245,13 @@ def _write_temporary(target: Path, text: str, files: list[Path]) -> Path:
     return path
 
 
-def _file_state(info: os.stat_result) -> _FileState:
+def _file_state(info: os.stat_result) -> FileState:
     """Возвращает идентичность и изменяемые признаки обычного файла."""
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
             info.st_mtime_ns)
 
 
-def _check_target(target: Path, expected: _FileState | None) -> None:
+def _check_target(target: Path, expected: FileState | None) -> None:
     """Отклоняет заметные изменения пути после подготовки его копии."""
     try:
         actual = _file_state(target.lstat())
@@ -261,7 +261,7 @@ def _check_target(target: Path, expected: _FileState | None) -> None:
         raise OSError(f"Файл результата изменился во время записи: {target}")
 
 
-def _backup_original(target: Path, backups: list[Path]) -> _Snapshot:
+def _backup_original(target: Path, backups: list[Path]) -> Snapshot:
     """Копирует обычный исходный файл, отклоняя символические ссылки."""
     try:
         info = target.lstat()
@@ -303,7 +303,7 @@ def _restore_one(target: Path, backup: Path | None,
         target.unlink()
 
 
-def _rollback(replaced: list[_Replacement]) -> list[str]:
+def _rollback(replaced: list[Replacement]) -> list[str]:
     """Пытается откатить все замены даже после отдельной ошибки."""
     failures = []
     for target, backup, identity in reversed(replaced):
@@ -347,8 +347,8 @@ def _save_replacing(d2: Path, svg: Path, texts: tuple[str, str]) -> None:
     targets = (d2, svg)
     temporary: list[Path] = []
     backups: list[Path] = []
-    snapshots: list[_Snapshot] = []
-    replaced: list[_Replacement] = []
+    snapshots: list[Snapshot] = []
+    replaced: list[Replacement] = []
     error = None
     rollback: list[str] = []
     try:
